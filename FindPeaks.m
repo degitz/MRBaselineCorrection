@@ -1,6 +1,6 @@
 function [TruePeaks, filtsz, ss] = FindPeaks(f_comp, F0, BW, opts)
 %% Initialize
-[f_comp, LW, SNR, filtsz, debugFLAG, A0, A1, PKmin, PKmax] = parseInputs(f_comp, opts, F0, BW);
+[f_comp, LW, SNR, filtsz, debugFLAG, verbose, ~, ~, PKmin, PKmax] = parseInputs(f_comp, opts, F0, BW);
 
 % Determine x-axis step size in terms of number of points
 Faxis_ss = BW/length(f_comp); % Hz/pt
@@ -46,7 +46,7 @@ f = real(F);
 LW2 = Linewidth_calculator(f, F0, BW);
 
 % Determine sample size in terms of number of points (we will use LW as sample size, can be changed later)
-ss = ceil(LW2/Faxis_ss);
+ss = round(LW2/Faxis_ss);
 
 % Calculate statistical datasets
 [fSTD, df, dfAD, dfSTD, dfsigns] = PeakStats(f, scales);
@@ -57,7 +57,7 @@ dfSTD_ph = mean(df_ph) + std(df_ph);
 
 %% Find easy peaks in magnitude & real data
 % Obtain df & dfSTD via numerical differentiation
-df_tmp = diff(f); df_nopeaks = df_tmp;
+df_tmp = diff(f_mg); df_nopeaks = df_tmp;
 df_nopeaks(df_tmp > std(df_tmp)) = NaN; df_nopeaks(df_tmp < -std(df_tmp)) = NaN;
 df_nopeaks(df_tmp > std(df_nopeaks)) = NaN; df_nopeaks(df_tmp < -std(df_nopeaks)) = NaN;
 dfSTD_tmp = mean(df_nopeaks, 'omitnan') + std(df_nopeaks, 'omitnan');
@@ -83,14 +83,14 @@ if ~(PK >= PKmin && PK <= PKmax)
             if PK <= PKmin % Increase
                 dw = 1/2; dp = 1/2;
             else % Decrease
-                dw = 2; dp = 2;
+                dw = 1.25; dp = 2;
             end
         else
             % Change
             if PK <= PKmin % Increase
                 dw = dw/2; dp = dp/2;
             else % Decrease
-                dw = dw*2; dp = dp*2;
+                dw = dw*1.25; dp = dp*2;
             end
         end
 
@@ -110,36 +110,42 @@ if ~(PK >= PKmin && PK <= PKmax)
             delpkFLAG = true;
 
             % Determine what to look for
-            if PK <= PKmin % need to increase
+            flag = false; %#ok<NASGU> % 1 = width, 2 = prominence
+            if tmp_PKw >= PKmin && tmp_PKw <= PKmax % Check if within bounds
+                if tmp_PKp >= PKmin && tmp_PKp <= PKmax
+                    if tmp_PKw > tmp_PKp
+                        flag = 1;
+                    else
+                        flag = 2;
+                    end
+                else
+                    flag = 1;
+                end
+            elseif tmp_PKp >= PKmin && tmp_PKp <= PKmax
+                flag = 2;
+            elseif PK <= PKmin % need to increase
                 % Determine which changed the most
                 if tmp_PKw > tmp_PKp % width caused greater change
-                    % Set peak number
-                    PK = tmp_PKw;
-
-                    % Update width
-                    w = w1;
+                    flag = 1;
                 else % prominence caused greater change
-                    % Set peak number
-                    PK = tmp_PKp;
-
-                    % Update prominence
-                    p = p1;
+                    flag = 2;
                 end
             else % need to decrease
                 % Determine which changed the most
                 if tmp_PKw < tmp_PKp % width caused greater change
-                    % Set peak number
-                    PK = tmp_PKw;
-
-                    % Update width
-                    w = w1;
+                    flag = 1;
                 else % prominence caused greater change
-                    % Set peak number
-                    PK = tmp_PKp;
-
-                    % Update prominence
-                    p = p1;
+                    flag = 2;
                 end
+            end
+
+            % Set peak number & update parameters
+            if flag == 1
+                PK = tmp_PKw;
+                w = w1;
+            elseif flag == 2
+                PK = tmp_PKp;
+                p = p1;
             end
 
             % Check number of peaks
@@ -171,7 +177,7 @@ end
 clear df_tmp dfSTD_tmp
 
 % Remove points to close to edges
-MPlocation = MPlocation(MPlocation>ss*2 & MPlocation<(length(f)-ss*2));
+MPlocation = MPlocation(MPlocation>ss*3 & MPlocation<(length(f)-ss*3));
 PK = length(MPlocation);
 
 % Create upper bound phase check
@@ -222,6 +228,14 @@ for i = 1:PK
     end
 end
 lc = MPlocation(pFLAG);
+
+if verbose
+    fprintf('\n%i peak(s) were found in the specta magnitude at the following locations:\n', length(lc));
+    for i = lc
+        fprintf('%i\t', i);
+    end
+    fprintf('\n')
+end
 
 %% Now find locations in real data (might be off a bit due to smoothing & peak broadening)
 % Plot data
@@ -277,7 +291,7 @@ for i = lc
     Peaks0(idx).Reopened = [];
 
     % First, move left to find beginning
-    Peaks0 = SearchLimit(Peaks0, idx, ss, f, fSTD, dfAD, dfSTD, dfsigns, false, debugFLAG);
+    Peaks0 = SearchLimit(Peaks0, idx, ss, f, fSTD, dfAD, dfSTD, dfsigns, false);
 
     % Transfer strikes & reset in structure
     tmp_sSTD = Peaks0(idx).StrikesSTD;
@@ -288,7 +302,7 @@ for i = lc
     Peaks0(idx).Reopened = [];
 
     % Then, move right to find end
-    Peaks0 = SearchLimit(Peaks0, idx, ss, f, fSTD, dfAD, dfSTD, dfsigns, true, debugFLAG);
+    Peaks0 = SearchLimit(Peaks0, idx, ss, f, fSTD, dfAD, dfSTD, dfsigns, true);
 
     % Recombine strikes
     Peaks0(idx).StrikesSTD = [tmp_sSTD, Peaks0(idx).StrikesSTD];
@@ -312,12 +326,6 @@ for i = lc
 
     % Check if bad peak
     if Peaks0(idx).TotalStrikes > Peaks0(idx).Width*0.75
-        % Remove from plot
-        if debugFLAG
-            plotdata = findobj(gca, 'Type', 'Line');
-            for j = 2:-1:1; delete(plotdata(j)); end
-        end
-
         % Remove from structure
         if idx == 1
             Peaks0 = [];
@@ -328,7 +336,27 @@ for i = lc
         % Shift back indexer
         idx = idx - 1;
 
-    else
+    else % not a bad peak
+        % Check if there is a peak to the left
+        if idx > 1
+            % Check if current peak starts before end of previous peak
+            if Peaks0(idx).Start(1) < Peaks0(idx-1).Stop(1)
+                % Flip points
+                truestart = Peaks0(idx-1).Stop;
+                trueend = Peaks0(idx).Start;
+                Peaks0(idx-1).Stop = trueend;
+                Peaks0(idx).Start = truestart;
+
+                % Recalculate width
+                Peaks0 = CalculatePeakInfo(Peaks0, idx-1:idx, f, df, dfsigns);
+
+                % Plot old peak end
+                if debugFLAG
+                    PlotPoints(Peaks0(idx-1).Stop(2), Peaks0(idx-1).Stop(1), idx-1, 1)
+                end
+            end
+        end
+
         % Plot peak
         if debugFLAG
             PlotPoints(Peaks0(idx).Start(2), Peaks0(idx).Start(1), idx)
@@ -337,316 +365,228 @@ for i = lc
     end
 end
 
-% Verification to ensure peaks start & stop at proper locations
-for i = 2:length(Peaks0)
-    % Check if start & stop are flipped
-    if Peaks0(i).Start(1) < Peaks0(i-1).Stop(1)
-        % Flip points
-        truestart = Peaks0(i-1).Stop;
-        trueend = Peaks0(i).Start;
-        Peaks0(i-1).Stop = trueend;
-        Peaks0(i).Start = truestart;
-
-        % Recalculate width
-        Peaks0 = CalculatePeakInfo(Peaks0, i-1:i, f, df, dfsigns);
-    end
+% Check for any NaNs
+nanslr = false(length(Peaks0),2);
+for i = 1:length(Peaks0)
+    % Check for nans
+    if isnan(Peaks0(i).LowerHalf.Length), nanslr(i,1) = true; end
+    if isnan(Peaks0(i).UpperHalf.Length), nanslr(i,2) = true; end
 end
 
 %% Combine doublets/triplets
-% Plot
-if debugFLAG, PlotPeaks('Combined Peaks', f, df, dfsigns); end
-
-% Measure difference in height between left/peak, right/peak, & left/right
-Ptdif = ones(length(Peaks0), 4);
-for i = 1:length(Peaks0)
-    Ptdif(i,1) = Peaks0(i).Peak(2) - Peaks0(i).Start(2); % left/lower half
-    Ptdif(i,2) = Peaks0(i).Peak(2) - Peaks0(i).Stop(2); % right/upper half
-    Ptdif(i,3) = abs(Peaks0(i).Stop(2) - Peaks0(i).Start(2)); % width
-
-    % Normalize
-    Ptdif(i,:) = Ptdif(i,:)./max(Ptdif(i,:));
-
-    % Find min
-    Ptdif(i,4) = find(Ptdif(i,:) == min(Ptdif(i,:)));
-end
-
-% Check for doublets/triplets
-combFLAG = false(length(Peaks0),1);
-idx = 0;
-for i = 1:length(Peaks0)
-    % Reset variables
-    s = [];
-    np = 0;
-
-    % Check if peak was combined
-    if ~combFLAG(i)
-        % Check if LR difference is not the smallest for current peak
-        if Ptdif(i,4) ~= 3
-            % Check which side the min is
-            if Ptdif(i,4) == 1
-                dirFLAG = 'left';
-            else
-                dirFLAG = 'right';
-            end
-
-            % Loop based on min side
-            if strcmp(dirFLAG, 'left') && i > 1
-                J = i-1:-1:1; if length(J) > 3, J = J(1:3); end
-                for j = J
-                    % Check for doublet
-                    % - peak immediately left should have a min on rightside
-                    if j == i-1 && Ptdif(j,4) == 2
-                        % Set doublet flag
-                        np = -1;
-
-                    % Check for triplet
-                    % - peak two over left should have a min on rightside
-                    elseif j == i-2 && Ptdif(j,4) == 2
-                        % Set triplet flag
-                        np = -2;
+% Verify linewidth is low enough for detectable doublets/triplets
+% - if linewidth is greater than 30Hz, doublets/triplets will likely not be visible
+if LW < 30
+    % Plot
+    if debugFLAG, PlotPeaks('Combined Peaks', f, df, dfsigns); end
+    
+    % Measure difference in height between left/peak, right/peak, & left/right
+    Ptdif = ones(length(Peaks0), 4);
+    for i = 1:length(Peaks0)
+        Ptdif(i,1) = Peaks0(i).Peak(2) - Peaks0(i).Start(2); % left/lower half
+        Ptdif(i,2) = Peaks0(i).Peak(2) - Peaks0(i).Stop(2); % right/upper half
+        Ptdif(i,3) = abs(Peaks0(i).Stop(2) - Peaks0(i).Start(2)); % width
+    
+        % Normalize
+        Ptdif(i,:) = Ptdif(i,:)./max(Ptdif(i,:));
+    
+        % Find min
+        Ptdif(i,4) = find(Ptdif(i,:) == min(Ptdif(i,:)));
+    end
+    
+    % Check for doublets/triplets
+    combFLAG = false(length(Peaks0),1);
+    idx = 0;
+    for i = 1:length(Peaks0)
+        % Reset variables
+        s = [];
+        np = 0;
+    
+        % Check if peak was combined
+        if ~combFLAG(i)
+            % Check if LR difference is not the smallest for current peak
+            if Ptdif(i,4) ~= 3
+                % Check which side the min is
+                if Ptdif(i,4) == 1
+                    dirFLAG = 'left';
+                else
+                    dirFLAG = 'right';
+                end
+    
+                % Loop based on min side
+                if strcmp(dirFLAG, 'left') && i > 1
+                    J = i-1:-1:1; if length(J) > 3, J = J(1:3); end
+                    for j = J
+                        % Check for doublet
+                        % - peak immediately left should have a min on rightside
+                        if j == i-1 && Ptdif(j,4) == 2
+                            % Set doublet flag
+                            np = -1;
+    
+                        % Check for triplet
+                        % - peak two over left should have a min on rightside
+                        elseif j == i-2 && Ptdif(j,4) == 2
+                            % Set triplet flag
+                            np = -2;
+                        end
+                    end
+    
+                elseif strcmp(dirFLAG, 'right') && i < length(Peaks0)
+                    J = i+1:length(Peaks0); if length(J) > 3, J = J(1:3); end
+                    for j = J
+                        % Check for doublet
+                        % - peak immediately right should have a min on leftside
+                        if j == i+1 && Ptdif(j,4) == 1
+                            % Set doublet flag
+                            np = 1;
+    
+                        % Check for triplet
+                        % - peak two over right should have a min on leftside
+                        elseif j == i+2 && Ptdif(j,4) == 1
+                            % Set triplet flag
+                            np = 2;
+                        end
+                    end
+    
+                else % too close to start or end
+                    % Shift iterator
+                    idx = idx + 1;
+    
+                    % Append peak to structure
+                    Peaks1(idx) = Peaks0(i);
+    
+                    % Plot
+                    if debugFLAG
+                        PlotPoints(Peaks1(idx).Start(2), Peaks1(idx).Start(1), idx)
+                        PlotPoints(Peaks1(idx).Stop(2), Peaks1(idx).Stop(1), idx)
+                    end
+    
+                    % Skip remainder of loop to avoid index errors
+                    continue
+                end
+    
+                % Set comparison points based on whether checking left or right
+                if strcmp(dirFLAG, 'left')
+                    L = i + np;
+                    R = i;
+                    if np == 0
+                        L = i - 1;
+                    end
+                else
+                    L = i;
+                    R = i + np;
+                    if np == 0
+                        R = i + 1;
                     end
                 end
-
-            elseif strcmp(dirFLAG, 'right') && i < length(Peaks0)
-                J = i+1:length(Peaks0); if length(J) > 3, J = J(1:3); end
-                for j = J
-                    % Check for doublet
-                    % - peak immediately right should have a min on leftside
-                    if j == i+1 && Ptdif(j,4) == 1
-                        % Set doublet flag
-                        np = 1;
-
-                    % Check for triplet
-                    % - peak two over right should have a min on leftside
-                    elseif j == i+2 && Ptdif(j,4) == 1
-                        % Set triplet flag
-                        np = 2;
+                RLgap = Peaks0(R).Start(1) - Peaks0(L).Stop(1);
+    
+                % Check for no doublets/triplets
+                if np == 0
+                    % Check if overlapping peaks
+                    % - the case if height difference between shared start & stop is small
+                    if abs(Peaks0(L).Start(2)-Peaks0(R).Start(2)) < (Peaks0(L).Peak(2)-Peaks0(L).Start(2))/2 && ...
+                       abs(Peaks0(L).Start(2)-Peaks0(R).Start(2)) < (Peaks0(R).Peak(2)-Peaks0(R).Stop(2))/2
+                        % Set flag & sample
+                        if strcmp(dirFLAG, 'left')
+                            s = i-1:i;
+                        else
+                            s = i:i+1;
+                        end
+                        combFLAG(s) = true;
                     end
-                end
-
-            else % too close to start or end
-                % Shift iterator
-                idx = idx + 1;
-
-                % Append peak to structure
-                Peaks1(idx) = Peaks0(i);
-
-                % Plot
-                if debugFLAG
-                    PlotPoints(Peaks1(idx).Start(2), Peaks1(idx).Start(1), idx)
-                    PlotPoints(Peaks1(idx).Stop(2), Peaks1(idx).Stop(1), idx)
-                end
-
-                % Skip remainder of loop to avoid index errors
-                continue
-            end
-
-            % Set comparison points based on whether checking left or right
-            if strcmp(dirFLAG, 'left')
-                L = i + np;
-                R = i;
-                if np == 0
-                    L = i - 1;
-                end
-            else
-                L = i;
-                R = i + np;
-                if np == 0
-                    R = i + 1;
-                end
-            end
-            RLgap = Peaks0(R).Start(1) - Peaks0(L).Stop(1);
-
-            % Check for no doublets/triplets
-            if np == 0
-                % Check if overlapping peaks
-                % - the case if height difference between shared start & stop is small
-                if abs(Peaks0(L).Start(2)-Peaks0(R).Start(2)) < (Peaks0(L).Peak(2)-Peaks0(L).Start(2))/2 && ...
-                   abs(Peaks0(L).Start(2)-Peaks0(R).Start(2)) < (Peaks0(R).Peak(2)-Peaks0(R).Stop(2))/2
+    
+                % Check if the shared halves of first & last peaks are 1/2 as long as unshared halves & distance between peak start & ends is less than ss
+                elseif Peaks0(R).LowerHalf.Length < Peaks0(R).UpperHalf.Length/2 && ...
+                       Peaks0(L).UpperHalf.Length < Peaks0(L).LowerHalf.Length/2 && ...
+                       RLgap < ss
                     % Set flag & sample
                     if strcmp(dirFLAG, 'left')
-                        s = i-1:i;
+                        s = i+np:i;
                     else
-                        s = i:i+1;
+                        s = i:i+np;
                     end
                     combFLAG(s) = true;
                 end
-
-            % Check if the shared halves of first & last peaks are 1/2 as long as unshared halves & distance between peak start & ends is less than ss
-            elseif Peaks0(R).LowerHalf.Length < Peaks0(R).UpperHalf.Length/2 && ...
-                   Peaks0(L).UpperHalf.Length < Peaks0(L).LowerHalf.Length/2 && ...
-                   RLgap < ss
-                % Set flag & sample
-                if strcmp(dirFLAG, 'left')
-                    s = i+np:i;
-                else
-                    s = i:i+np;
-                end
-                combFLAG(s) = true;
             end
-        end
-
-        % Shift iterator
-        idx = idx + 1;
-
-        % Check if need to combine peaks
-        if ~isempty(s)
-            % Check if need to remove already indexed peak
-            if strcmp(dirFLAG, 'left')
-                % Remove from plot
-                if debugFLAG
-                    plotdata = findobj(gca, 'Type', 'Line');
-                    for j = 2:-1:1; delete(plotdata(j)); end
-                end
-
-                % Determine number of points to remove
-                numpts = length(s)-1;
-
-                % Remove peaks
-                Peaks1 = Peaks1(1:end-numpts);
-
-                % Shift back iterator to account for removed peaks
-                idx = idx - numpts;
-            end
-
-            % Combine peaks
-            Peaks1(idx).Start = Peaks0(s(1)).Start;
-            itmp = 0;
-            for j = s
-                itmp = itmp + 1;
-                Peaks1(idx).Peak(:,itmp) = Peaks0(j).Peak;
-            end
-            clear itmp
-            Peaks1(idx).Stop = Peaks0(s(end)).Stop;
-            Peaks1(idx).Width = Peaks1(idx).Stop(1) - Peaks1(idx).Start(1) + 1;
-            Peaks1(idx).StrikesSTD = []; Peaks1(idx).StrikesSign = []; Peaks1(idx).Reopened = []; Peaks1(idx).TotalStrikes = 0;
-            for j = s
-                Peaks1(idx).StrikesSTD = [Peaks1(idx).StrikesSTD, Peaks0(j).StrikesSTD];
-                Peaks1(idx).StrikesSign = [Peaks1(idx).StrikesSign, Peaks0(j).StrikesSign];
-                Peaks1(idx).Reopened = [Peaks1(idx).Reopened, Peaks0(j).Reopened];
-                Peaks1(idx).TotalStrikes = Peaks1(idx).TotalStrikes + Peaks0(j).TotalStrikes;
-            end
-            Peaks1(idx).LowerHalf = Peaks0(s(1)).LowerHalf;
-            Peaks1(idx).UpperHalf = Peaks0(s(end)).UpperHalf;
-
-            % Ensure NaNs do not endure through combination
-            if isnan(Peaks1(idx).LowerHalf.Length)
-                Peaks1(idx).LowerHalf = struct('Length', Peaks1(idx).Peak(1,1) - Peaks1(idx).Start(1), ...
-                                                  'Sum', sum(df(Peaks1(idx).Start(1):Peaks1(idx).Peak(1,1))), ...
-                                                 'Sign', sum(dfsigns(Peaks1(idx).Start(1):Peaks1(idx).Peak(1,1))));
-            end
-            if isnan(Peaks1(idx).UpperHalf.Length)
-                Peaks1(idx).UpperHalf = struct('Length', Peaks1(idx).Stop(1)+1 - Peaks1(idx).Peak(1,end), ...
-                                                  'Sum', sum(df(Peaks1(idx).Peak(1,end):Peaks1(idx).Stop(1)+1)), ...
-                                                 'Sign', sum(dfsigns(Peaks1(idx).Peak(1,end):Peaks1(idx).Stop(1)+1)));
-            end
-
-        else % not doublet/triplet peak
-            % Append peak to structure
-            Peaks1(idx) = Peaks0(i);
-        end
-
-        % Plot
-        if debugFLAG
-            PlotPoints(Peaks1(idx).Start(2), Peaks1(idx).Start(1), idx)
-            PlotPoints(Peaks1(idx).Stop(2), Peaks1(idx).Stop(1), idx)
-        end
-    end
-end
-
-%% Clean up peaks
-% Plot
-if debugFLAG, PlotPeaks('Cleaned Peaks', f, df, dfsigns); end
-
-% Clean up peaks & get more information for analysis
-idx = 0;
-for i = 1:length(Peaks1)
-    % Reset first if FLAG
-    newpeak = false;
-
-    % Check if one side is not >> than other side
-    if Peaks1(i).UpperHalf.Length/Peaks1(i).LowerHalf.Length < 5 || Peaks1(i).LowerHalf.Length/Peaks1(i).UpperHalf.Length < 5
-        % Reset flags
-        leftFLAG = false;
-        rightFLAG = false;
-
-        % Check if peak is a true peak (lower half should be positive slope)
-        if Peaks1(i).LowerHalf.Sign >= Peaks1(i).LowerHalf.Length*0.75
-            leftFLAG = true;
-        % Some allowence is made for doublet/triplet peaks & poor shim
-        elseif Peaks1(i).LowerHalf.Sign >= Peaks1(i).LowerHalf.Length*0.675
-            % Create normalized peak value
-            Pkmain = Peaks1(i).Peak(2) - (Peaks1(i).Start(2) + Peaks1(i).Stop(2))/2;
-
-            % Find max value to left of peak
-            Pkrange = max(f(round(Peaks1(i).Start(1)+ss/4):round(Peaks1(i).Peak(1)-ss/4))) - (Peaks1(i).Start(2) + Peaks1(i).Stop(2))/2;
-
-            % Check for possible doublet (if normalized point is 90% of main peak)
-            if Pkrange/Pkmain >= 0.9, leftFLAG = true; end
-        end
-
-        % Check if peak is a true peak (upper half should be negative slope)
-        if Peaks1(i).UpperHalf.Sign <= Peaks1(i).UpperHalf.Length*0.25
-            rightFLAG = true;
-
-        % Some allowence is made for doublet/triplet peaks & poor shim
-        elseif Peaks1(i).UpperHalf.Sign <= Peaks1(i).UpperHalf.Length*0.325
-            % Create normalized peak value
-            Pkmain = Peaks1(i).Peak(2) - (Peaks1(i).Start(2) + Peaks1(i).Stop(2))/2;
-
-            % Find max value to right of peak
-            Pkrange = max(f(round(Peaks1(i).Peak(1)+ss/4):round(Peaks1(i).Stop(1)-ss/4))) - (Peaks1(i).Start(2) + Peaks1(i).Stop(2))/2;
-
-            % Check for possible doublet (if normalized point is 90% of main peak)
-            if Pkrange/Pkmain >= 0.9, rightFLAG = true; end
-        end
-
-        if leftFLAG && rightFLAG
-            % Shift indexer & append peak data to final array
+    
+            % Shift iterator
             idx = idx + 1;
-            Peaks2(idx) = Peaks1(i); %#ok<*SAGROW>
-
-            % Set flag
-            newpeak = true;
-
-            % Plot peak
+    
+            % Check if need to combine peaks
+            if ~isempty(s)
+                % Check if need to remove already indexed peak
+                if strcmp(dirFLAG, 'left')
+                    % Remove from plot
+                    if debugFLAG
+                        plotdata = findobj(gca, 'Type', 'Line');
+                        for j = 2:-1:1; delete(plotdata(j)); end
+                    end
+    
+                    % Determine number of points to remove
+                    numpts = length(s)-1;
+    
+                    % Remove peaks
+                    Peaks1 = Peaks1(1:end-numpts);
+    
+                    % Shift back iterator to account for removed peaks
+                    idx = idx - numpts;
+                end
+    
+                % Combine peaks
+                Peaks1(idx).Start = Peaks0(s(1)).Start;
+                itmp = 0;
+                for j = s
+                    itmp = itmp + 1;
+                    Peaks1(idx).Peak(:,itmp) = Peaks0(j).Peak;
+                end
+                clear itmp
+                Peaks1(idx).Stop = Peaks0(s(end)).Stop;
+                Peaks1(idx).Width = Peaks1(idx).Stop(1) - Peaks1(idx).Start(1) + 1;
+                Peaks1(idx).StrikesSTD = []; Peaks1(idx).StrikesSign = []; Peaks1(idx).Reopened = []; Peaks1(idx).TotalStrikes = 0;
+                for j = s
+                    Peaks1(idx).StrikesSTD = [Peaks1(idx).StrikesSTD, Peaks0(j).StrikesSTD];
+                    Peaks1(idx).StrikesSign = [Peaks1(idx).StrikesSign, Peaks0(j).StrikesSign];
+                    Peaks1(idx).Reopened = [Peaks1(idx).Reopened, Peaks0(j).Reopened];
+                    Peaks1(idx).TotalStrikes = Peaks1(idx).TotalStrikes + Peaks0(j).TotalStrikes;
+                end
+                Peaks1(idx).LowerHalf = Peaks0(s(1)).LowerHalf;
+                Peaks1(idx).UpperHalf = Peaks0(s(end)).UpperHalf;
+    
+                % Ensure NaNs do not endure through combination
+                if isnan(Peaks1(idx).LowerHalf.Length)
+                    Peaks1(idx).LowerHalf = struct('Length', Peaks1(idx).Peak(1,1) - Peaks1(idx).Start(1), ...
+                                                      'Sum', sum(df(Peaks1(idx).Start(1):Peaks1(idx).Peak(1,1))), ...
+                                                     'Sign', sum(dfsigns(Peaks1(idx).Start(1):Peaks1(idx).Peak(1,1))));
+                end
+                if isnan(Peaks1(idx).UpperHalf.Length)
+                    Peaks1(idx).UpperHalf = struct('Length', Peaks1(idx).Stop(1)+1 - Peaks1(idx).Peak(1,end), ...
+                                                      'Sum', sum(df(Peaks1(idx).Peak(1,end):Peaks1(idx).Stop(1)+1)), ...
+                                                     'Sign', sum(dfsigns(Peaks1(idx).Peak(1,end):Peaks1(idx).Stop(1)+1)));
+                end
+    
+            else % not doublet/triplet peak
+                % Append peak to structure
+                Peaks1(idx) = Peaks0(i);
+            end
+    
+            % Plot
             if debugFLAG
-                PlotPoints(Peaks2(idx).Start(2), Peaks2(idx).Start(1), idx)
-                PlotPoints(Peaks2(idx).Stop(2), Peaks2(idx).Stop(1), idx)
+                PlotPoints(Peaks1(idx).Start(2), Peaks1(idx).Start(1), idx)
+                PlotPoints(Peaks1(idx).Stop(2), Peaks1(idx).Stop(1), idx)
             end
         end
     end
-
-    % Check if upper half is negative slope & slope between two peak bases is mostly positive
-    if idx > 0 && ~newpeak && ~previouspeakcombination &&...
-       Peaks1(i).UpperHalf.Sign <= Peaks1(i).UpperHalf.Length*0.25 && ...
-       sum(dfsigns(Peaks2(idx).Stop(1)+1:Peaks1(i).Start(1))) >= (Peaks1(i).Start(1)-(Peaks2(idx).Stop(1)+1))*0.75
-        
-        % Combine two peaks (because peaks are likely overlapping due to poor shim and/or poor spectral resolution)
-        Peaks2(idx).Stop = Peaks1(i).Stop;
-        Peaks2(idx).StrikesSTD = unique(sort([Peaks1(i).StrikesSTD, Peaks2(idx).StrikesSTD]));
-        Peaks2(idx).StrikesSign = unique(sort([Peaks1(i).StrikesSign, Peaks2(idx).StrikesSign]));
-        Peaks2 = CalculatePeakInfo(Peaks2, idx, f, df, dfsigns);
-
-        % Set flag
-        previouspeakcombination = true;
-
-        % Plot points
-        if debugFLAG
-            PlotPoints(Peaks2(idx).Stop(2), Peaks2(idx).Stop(1), idx, 1)
-        end
-    else
-        % Reset flag
-        previouspeakcombination = false;
-    end
+else
+    Peaks1 = Peaks0;
 end
 
 %% Combine overlapping peaks
 % Clean up peaks & get more information for analysis
-if length(Peaks2) > 1
+if length(Peaks1) > 1
     % Plot
     if debugFLAG
-        PlotPeaks('Final Peaks', f, df, dfsigns);
+        PlotPeaks('Combined Peaks: Overlapping', f, df, dfsigns);
     end
 
     % Initialize indexers
@@ -655,7 +595,7 @@ if length(Peaks2) > 1
     idx1 = 1;
 
     % Loop through peaks
-    while i < length(Peaks2)
+    while i < length(Peaks1)
         % Shift indexer
         i = i + 1;
 
@@ -664,41 +604,75 @@ if length(Peaks2) > 1
 
         % Check if there is a peak to the left
         if idx > 0
+            % Determine distance between current peak stop & next peak start
+            pdiff = Peaks1(i).Start(1) - Peaks2(idx).Stop(1);
+
             % Check if peak ends close to start of current peak
-            if Peaks2(i).Start(1) - Peaks3(idx).Stop(1) < ss/3
+            if pdiff < ss/3
                 % Check if left is significantly shorter & closer to peak than right
-                if Peaks2(i).UpperHalf.Length/Peaks2(i).LowerHalf.Length >= 3 && ...
-                   Peaks2(i).Peak(2)-Peaks2(i).Start(2) < 3*(Peaks2(i).Peak(2)-Peaks2(i).Stop(2))
+                if Peaks1(i).UpperHalf.Length/Peaks1(i).LowerHalf.Length >= 3 && ...
+                   Peaks1(i).Peak(2)-Peaks1(i).Start(2) < 3*(Peaks1(i).Peak(2)-Peaks1(i).Stop(2))
                     % Update flag
                     combFLAG = true;
+                end
 
-                    % Plot point
-                    if debugFLAG
-                        PlotPoints(Peaks2(i).Stop(2), Peaks2(i).Stop(1), idx, 1)
-                    end
+            elseif pdiff < ss*3
+                % Check if upper half is negative slope & slope between two peak bases is mostly positive
+                % - Peaks are likely overlapping due to poor shim and/or poor spectral resolution
+                if Peaks1(i).UpperHalf.Sign/Peaks1(i).UpperHalf.Length <= 0.25 && ...
+                   sum(dfsigns(Peaks2(idx).Stop(1)+1:Peaks1(i).Start(1)))/(Peaks1(i).Start(1)-(Peaks2(idx).Stop(1)+1)) >= 0.75
+                    % Update flag
+                    combFLAG = true;
                 end
             end
 
+            % Check if left combination
+            if combFLAG
+                % Plot point
+                if debugFLAG
+                    PlotPoints(Peaks1(i).Stop(2), Peaks1(i).Stop(1), idx, 1)
+                end
+            end
+        end
+
+
         % Check if there is a peak to the right
-        elseif i < length(Peaks2)
+        if i < length(Peaks1) && ~combFLAG
+            % Determine distance between current peak stop & next peak start
+            pdiff = Peaks1(i+1).Start(1) - Peaks1(i).Stop(1);
+
             % Check if peak ends close to start of current peak
-            if Peaks2(i+1).Start(1) - Peaks2(i).Stop(1) < ss/3
+            if pdiff < ss/3
                 % Check if right is significantly shorter & closer to peak than left
-                if Peaks2(i).LowerHalf.Length/Peaks2(i).UpperHalf.Length >= 2.5 && ...
-                  (Peaks2(i).Peak(2)-Peaks2(i).Stop(2)) < 3*(Peaks2(i).Peak(2)-Peaks2(i).Start(2))
-                    % Update indexers & flag
-                    i = i + 1;
-                    idx = idx + 1;
+                if Peaks1(i).LowerHalf.Length/Peaks1(i).UpperHalf.Length >= 2.5 && ...
+                  (Peaks1(i).Peak(2)-Peaks1(i).Stop(2)) < 3*(Peaks1(i).Peak(2)-Peaks1(i).Start(2))
+                    % Update flag
                     combFLAG = true;
+                end
 
-                    % Index peak
-                    Peaks3(idx) = Peaks2(i-1);
+            elseif pdiff < ss*3
+                % Check if lower half is positive slope & slope between two peak bases is mostly negative
+                % - Peaks are likely overlapping due to poor shim and/or poor spectral resolution
+                if Peaks1(i).LowerHalf.Sign/Peaks1(i).LowerHalf.Length >= 0.75 && ...
+                   sum(dfsigns(Peaks1(i).Stop(1)+1:Peaks1(i+1).Start(1)))/(Peaks1(i+1).Start(1)-(Peaks1(i).Stop(1)+1)) <= 0.25
+                    % Update flag
+                    combFLAG = true;
+                end
+            end
 
-                    % Plot point
-                    if debugFLAG
-                        PlotPoints(Peaks3(idx).Start(2), Peaks3(idx).Start(1), idx)
-                        PlotPoints(Peaks2(i).Stop(2), Peaks2(i).Stop(1), idx)
-                    end
+            % Check if right combination
+            if combFLAG
+                % Update indexers
+                i = i + 1;
+                idx = idx + 1;
+
+                % Index peak
+                Peaks2(idx) = Peaks1(i-1);
+
+                % Plot point
+                if debugFLAG
+                    PlotPoints(Peaks2(idx).Start(2), Peaks2(idx).Start(1), idx)
+                    PlotPoints(Peaks1(i).Stop(2), Peaks1(i).Stop(1), idx)
                 end
             end
         end
@@ -709,13 +683,25 @@ if length(Peaks2) > 1
             idx1 = idx1 + 1;
 
             % Combine data
-            Peaks3(idx).Stop = Peaks2(i).Stop;
-            Peaks3(idx).Width = Peaks3(idx).Stop(1) - Peaks3(idx).Start(1);
-            Peaks3(idx).Peak(idx1:(idx1+size(Peaks2(i).Peak,1)-1),:) = Peaks2(i).Peak;
-            Peaks3(idx).Amplitude(idx1:(idx1+length(Peaks2(i).Amplitude)-1)) = Peaks2(i).Amplitude;
-            Peaks3(idx).UpperHalf = Peaks2(i).UpperHalf;
-            Peaks3(idx).StrikesSTD = [Peaks3(idx).StrikesSTD, Peaks2(i).StrikesSTD];
-            Peaks3(idx).StrikesSign = [Peaks3(idx).StrikesSign, Peaks2(i).StrikesSign];
+            Peaks2(idx).Stop = Peaks1(i).Stop;
+            Peaks2(idx).Width = Peaks2(idx).Stop(1) - Peaks2(idx).Start(1);
+            Peaks2(idx).Peak(idx1:(idx1+size(Peaks1(i).Peak,1)-1),:) = Peaks1(i).Peak;
+            Peaks2(idx).Amplitude(idx1:(idx1+length(Peaks1(i).Amplitude)-1)) = Peaks1(i).Amplitude;
+            Peaks2(idx).UpperHalf = Peaks1(i).UpperHalf;
+            Peaks2(idx).StrikesSTD = [Peaks2(idx).StrikesSTD, Peaks1(i).StrikesSTD];
+            Peaks2(idx).StrikesSign = [Peaks2(idx).StrikesSign, Peaks1(i).StrikesSign];
+
+            % Ensure NaNs do not endure through combination
+            if isnan(Peaks2(idx).LowerHalf.Length)
+                Peaks2(idx).LowerHalf = struct('Length', Peaks2(idx).Peak(1,1) - Peaks2(idx).Start(1), ...
+                                                  'Sum', sum(df(Peaks2(idx).Start(1):Peaks2(idx).Peak(1,1))), ...
+                                                 'Sign', sum(dfsigns(Peaks2(idx).Start(1):Peaks2(idx).Peak(1,1))));
+            end
+            if isnan(Peaks2(idx).UpperHalf.Length)
+                Peaks2(idx).UpperHalf = struct('Length', Peaks2(idx).Stop(1)+1 - Peaks2(idx).Peak(1,end), ...
+                                                  'Sum', sum(df(Peaks2(idx).Peak(1,end):Peaks2(idx).Stop(1)+1)), ...
+                                                 'Sign', sum(dfsigns(Peaks2(idx).Peak(1,end):Peaks2(idx).Stop(1)+1)));
+            end
 
         else
             % Reset subindexer
@@ -723,7 +709,69 @@ if length(Peaks2) > 1
 
             % Append to array
             idx = idx + 1;
-            Peaks3(idx) = Peaks2(i);
+            Peaks2(idx) = Peaks1(i);
+
+            % Plot peak
+            if debugFLAG
+                PlotPoints(Peaks2(idx).Start(2), Peaks2(idx).Start(1), idx)
+                PlotPoints(Peaks2(idx).Stop(2), Peaks2(idx).Stop(1), idx)
+            end
+        end
+    end
+else
+    Peaks2 = Peaks1;
+end
+
+%% Clean up peaks
+% Plot
+if debugFLAG, PlotPeaks('Cleaned Peaks', f, df, dfsigns); end
+
+% Clean up peaks & get more information for analysis
+idx = 0;
+for i = 1:length(Peaks2)
+    % Check if one side is not >> than other side
+    if Peaks2(i).UpperHalf.Length/Peaks2(i).LowerHalf.Length < 5 || ...
+       Peaks2(i).LowerHalf.Length/Peaks2(i).UpperHalf.Length < 5
+        % Reset flags
+        leftFLAG = false;
+        rightFLAG = false;
+
+        % Check if peak is a true peak (lower half should be positive slope)
+        if Peaks2(i).LowerHalf.Sign >= Peaks2(i).LowerHalf.Length*0.75
+            leftFLAG = true;
+
+        % Some allowence is made for doublet/triplet peaks & poor shim
+        elseif Peaks2(i).LowerHalf.Sign >= Peaks2(i).LowerHalf.Length*0.675
+            % Create normalized peak value
+            Pkmain = Peaks2(i).Peak(2) - (Peaks2(i).Start(2) + Peaks2(i).Stop(2))/2;
+
+            % Find max value to left of peak
+            Pkrange = max(f(round(Peaks2(i).Start(1)+ss/4):round(Peaks2(i).Peak(1)-ss/4))) - (Peaks2(i).Start(2) + Peaks2(i).Stop(2))/2;
+
+            % Check for possible doublet (if normalized point is 90% of main peak)
+            if Pkrange/Pkmain >= 0.9, leftFLAG = true; end
+        end
+
+        % Check if peak is a true peak (upper half should be negative slope)
+        if Peaks2(i).UpperHalf.Sign <= Peaks2(i).UpperHalf.Length*0.25
+            rightFLAG = true;
+
+        % Some allowence is made for doublet/triplet peaks & poor shim
+        elseif Peaks2(i).UpperHalf.Sign <= Peaks2(i).UpperHalf.Length*0.325
+            % Create normalized peak value
+            Pkmain = Peaks2(i).Peak(2) - (Peaks2(i).Start(2) + Peaks2(i).Stop(2))/2;
+
+            % Find max value to right of peak
+            Pkrange = max(f(round(Peaks2(i).Peak(1)+ss/4):round(Peaks2(i).Stop(1)-ss/4))) - (Peaks2(i).Start(2) + Peaks2(i).Stop(2))/2;
+
+            % Check for possible doublet (if normalized point is 90% of main peak)
+            if Pkrange/Pkmain >= 0.9, rightFLAG = true; end
+        end
+
+        if leftFLAG && rightFLAG
+            % Shift indexer & append peak data to final array
+            idx = idx + 1;
+            Peaks3(idx) = Peaks2(i); %#ok<*SAGROW>
 
             % Plot peak
             if debugFLAG
@@ -732,8 +780,6 @@ if length(Peaks2) > 1
             end
         end
     end
-else
-    Peaks3 = Peaks2;
 end
 
 %% Final Verifications
@@ -780,19 +826,15 @@ TruePeaks = Peaks3;
 
 %% Functions
 
-    function [fcomp, LW, SNR, filtsz, debugFLAG, a0, a1, PKmin, PKmax] = parseInputs(fcomp, opts, F0, BW)
+    function [fcomp, LW, SNR, filtsz, debugFLAG, verbose, a0, a1, PKmin, PKmax] = parseInputs(fcomp, opts, F0, BW)
         % Ensure input is structure
         if ~isstruct(opts), error('Options variable must be a structure'); end
 
         % Check input
-        if length(size(fcomp)) > 2
+        if ~isvector(fcomp)
             error('Input must be a 1D array')
         elseif size(fcomp,1) > 1
-            if size(fcomp,2) > 1
-                error('Input must be a 1D array')
-            else
-                fcomp = fcomp.';
-            end
+            fcomp = fcomp.';
         end
         freal = real(fcomp);
 
@@ -803,6 +845,7 @@ TruePeaks = Peaks3;
         a0 = 0;
         PKmin = 10;
         PKmax = 30;
+        verbose = false;
 
         % Parse through input structure
         if isfield(opts, 'LW')
@@ -817,6 +860,7 @@ TruePeaks = Peaks3;
         end
         if isfield(opts, 'filtsz'), filtsz = opts.filtsz; end
         if isfield(opts, 'debugFLAG'), debugFLAG = opts.debugFLAG; end
+        if isfield(opts, 'verbose'), verbose = opts.verbose; end
         if isfield(opts, 'a1'), a1 = opts.a1; end
         if isfield(opts, 'a0'), a0 = opts.a0; end
         if isfield(opts, 'PKmin'), PKmin = opts.PKmin; end
@@ -862,11 +906,147 @@ TruePeaks = Peaks3;
         k = 1+floor((0:scales*xMaxWAV)/(scales*stepWAV));
         if isscalar(k), k = [1 1]; end
         coefs = sqrt(scales)*wkeep1(diff(wconv1(ySIG,fliplr(val_WAV(k)))),length(ySIG));
+
+        % function dyadup_custom
     end
     
+    % function [Fpk, Xpk] = findpeaks_custom(f, opts)
+    %     %   Copyright 2007-2023 The MathWorks, Inc.
+    % 
+    %     % Set default values
+    %     Dmin = 0; % min peak distance
+    %     Hmin = -Inf; % min peak height
+    %     Pmin = 0; % min peak prominence
+    %     Wmin = 0; % min peak width
+    %     Wmax = Inf; % max peak width
+    %     Nmax = length(f); % max # peaks
+    %     Th = 0; % peak threshold
+    %     x = 1:length(f); % x-axis vector
+    % 
+    %     % Grab user input options
+    %     names = fieldnames(opts);
+    %     switch names
+    %         case 'Dmin'
+    %             Dmin = opts.Dmin;
+    %         case 'Hmin'
+    %             Hmin = opts.Hmin;
+    %         case 'Pmin'
+    %             Pmin = opts.Pmin;
+    %         case 'Wmin'
+    %             Wmin = opts.Wmin;
+    %         case 'Wmax'
+    %             Wmax = opts.Wmax;
+    %         case 'Nmax'
+    %             Nmax = opts.Nmax;
+    %         case 'Th'
+    %             Th = opts.Th;
+    %         case 'x'
+    %             x = opts.x;
+    %     end
+    % 
+    %     % find indices of all finite and infinite peaks and the inflection points
+    %     [iFinite,iInfinite,iInflect] = getAllPeaks(f);
+    % 
+    %     % keep only the indices of finite peaks that meet the required minimum height and threshold
+    %     if ~isempty(iFinite)
+    %         iPk = iFinite(f(iFinite) > Hmin);
+    %     else
+    %         iPk = iFinite;
+    %     end
+    %     base = max(f(iPk-1), f(iPk+1));
+    %     iPk = iPk(f(iPk)-base >= Th);
+    % 
+    %     % obtain the indices of each peak (iPk), the prominence base (bPk), and the x- and y- coordinates of the peak base (bxPk, byPk) and the width (wxPk)
+    %     [iPk,bPk,bxPk,byPk,wxPk] = signal.internal.findpeaks.findExtents(f,x,iPk,iFinite,iInfinite,iInflect,Pmin,Wmin,Wmax,'halfprom');
+    % 
+    %     % find the indices of the largest peaks within the specified distance
+    %     BigPeaks = findPeaksSeparatedByMoreThanMinPeakDistance(f,x,iPk,Dmin,sortDir);
+    % 
+    %     % use the index vector to fetch the correct peaks. explicit creation of peaks to prevent resizing of iPk
+    %     if length(BigPeaks) > Nmax
+    %         fPk = coder.nullcopy(zeros(Nmax, 1, class(iPk)));
+    %         % Keep at most maxN peaks
+    %         BigPeaks = BigPeaks(1:Nmax);
+    %     else
+    %         fPk = coder.nullcopy(zeros(size(BigPeaks), class(iPk)));
+    %     end
+    % 
+    %     fPk = iPk(BigPeaks(1:length(fPk)));
+    % 
+    %     % assign output variables
+    %     Fpk = f(fPk);
+    %     Xpk = x(fPk);
+    % 
+    %     function [iPk,iInf,iInflect] = getAllPeaks(y)
+    %         % fetch indices all infinite peaks
+    %         iInf = find(isinf(y) & y>0);
+    % 
+    %         % temporarily remove all +Inf values
+    %         yTemp = y;
+    %         yTemp(iInf) = NaN;
+    % 
+    %         % determine the peaks and inflection points of the signal
+    %         % bookend Y by NaN and make index vector
+    %         yTemp = [NaN; yTemp; NaN];
+    %         iTemp = (1:length(yTemp)).';
+    % 
+    %         % keep only the first of any adjacent pairs of equal values (including NaN).
+    %         yFinite = ~isnan(yTemp);
+    %         iNeq = [1; 1 + find((yTemp(1:end-1) ~= yTemp(2:end)) & ...
+    %             (yFinite(1:end-1) | yFinite(2:end)))];
+    %         iTemp = iTemp(iNeq);
+    % 
+    %         % take the sign of the first sample derivative
+    %         s = sign(diff(yTemp(iTemp)));
+    % 
+    %         % find local maxima
+    %         iMax = 1 + find(diff(s)<0);
+    % 
+    %         % find all transitions from rising to falling or to NaN
+    %         iAny = 1 + find(s(1:end-1)~=s(2:end));
+    % 
+    %         % index into the original index vector without the NaN bookend.
+    %         iInflect = iTemp(iAny)-1;
+    %         iPk = iTemp(iMax)-1;
+    %     end
+    % 
+    %     function idx = findPeaksSeparatedByMoreThanMinPeakDistance(y,x,iPk,Pd,sortDir)
+    %         % Start with the larger peaks to make sure we don't accidentally keep a small peak and remove a large peak in its neighborhood.
+    % 
+    %         if isempty(iPk) || Pd == 0
+    %             idx = (1:length(iPk)).';
+    %             return
+    %         end
+    % 
+    %         % copy peak values and locations to a temporary place
+    %         pks = y(iPk);
+    %         locs_temp = x(iPk);
+    % 
+    %         % Order peaks from large to small
+    %         [~, sortIdx] = sort(pks,'d');
+    %         locs_temp = locs_temp(sortIdx);
+    % 
+    %         idelete = zeros(size(locs_temp), 'logical');
+    %         for ii = 1:length(idelete)
+    %             if ~idelete(ii)
+    %                 % If the peak is not in the neighborhood of a larger peak, find secondary peaks to eliminate.
+    %                 idelete = idelete | (locs_temp>=locs_temp(ii)-Pd)&(locs_temp<=locs_temp(ii)+Pd);
+    %                 idelete(ii) = 0; % Keep current peak
+    %             end
+    %         end
+    % 
+    %         % report back indices in consecutive order
+    %         idx = sortIdx(~idelete);
+    % 
+    %         if isempty(idx), return; end
+    % 
+    %         % re-order and bound the number of peaks based upon the index vector
+    %         if strcmp(sortDir,'none'), idx = sort(idx); end
+    %     end
+    % end
+
     function [fSTD, df, dfAD, dfSTD, dfsigns] = PeakStats(f, scales)
         % Take derivative of filtered data
-        % df = [diff(f), 0];
         df = cwt_custom(f, scales);
         
         % Determine derivative sign (true = pos, false = neg/0)
@@ -880,7 +1060,7 @@ TruePeaks = Peaks3;
         df_np(df < -std(df_np)) = NaN;
         
         % Obtain absolute deviation & standard deviation for df
-        dfAD = abs(df - mean(df_np, 'omitnan'));
+        dfAD = abs( df - mean(df_np, 'omitnan'));
         dfSTD = mean(df_np, 'omitnan') + std(df_np, 'omitnan');
         
         % Obtain first standard deviation line for spectra
@@ -908,7 +1088,7 @@ TruePeaks = Peaks3;
         LC = LC(LC~=0);
     end
 
-    function Peak = SearchLimit(Peak, idx, ss, f, fSTD, dfAD, dfSTD, dfsigns, rdir, pltFLAG)
+    function Peak = SearchLimit(Peak, idx, ss, f, fSTD, dfAD, dfSTD, dfsigns, rdir)
         % Set shift amount
         if rdir
             sval = 1;
@@ -1111,7 +1291,7 @@ TruePeaks = Peaks3;
                 end
         
                 % Close peak
-                Peak = CloseFlipPeak(Peak, f, k, idx, rdir, pltFLAG);
+                Peak = CloseFlipPeak(Peak, k, idx, rdir);
         
                 % End loop
                 break
@@ -1134,17 +1314,12 @@ TruePeaks = Peaks3;
             end
         end
     
-        function Peak = CloseFlipPeak(Peak, f, i, idx, rdir, pltFLAG)
+        function Peak = CloseFlipPeak(Peak, i, idx, rdir)
             % Add current point to list
             if ~rdir
                 Peak(idx).Start(1) = i;
             else
                 Peak(idx).Stop(1) = i;
-            end
-    
-            if pltFLAG
-                % Plot closed peak
-                PlotPoints(f(i), i, idx)
             end
         end
     end
@@ -1182,10 +1357,10 @@ TruePeaks = Peaks3;
                 Pk(k).LowerHalf = struct('Length', NaN, ...
                                            'Sign', NaN);
             end
-            if Pk(k).Peak(1) ~= Pk(k).Stop(1)+1 % Plus one because peak point is included as part of second half
-                Pk(k).UpperHalf = struct('Length', Pk(k).Stop(1)+1 - Pk(k).Peak(1), ...
-                                            'Sum', sum(df(Pk(k).Peak(1):Pk(k).Stop(1)+1)), ...
-                                           'Sign', sum(dfsigns(Pk(k).Peak(1):Pk(k).Stop(1)+1)));
+            if Pk(k).Peak(1) ~= Pk(k).Stop(1) 
+                Pk(k).UpperHalf = struct('Length', Pk(k).Stop(1) - Pk(k).Peak(1), ...
+                                            'Sum', sum(df(Pk(k).Peak(1):Pk(k).Stop(1))), ...
+                                           'Sign', sum(dfsigns(Pk(k).Peak(1):Pk(k).Stop(1))));
             else
                 Pk(k).UpperHalf = struct('Length', NaN, ...
                                            'Sign', NaN);
@@ -1266,6 +1441,7 @@ TruePeaks = Peaks3;
         switch fmethod
             case 'filter'
                 % Select filter size based on SNR
+                calcfiltFLAG = false;
                 if snr > 500
                     filtsz = 2;
                 elseif snr > 250
@@ -1273,13 +1449,15 @@ TruePeaks = Peaks3;
                     filt_lb = 230;
                     filt_minsz = 2;
                     filt_maxsz = 3;
+                    calcfiltFLAG = true;
                 elseif snr < 75
                     filtsz = 10;
                 else
+                    calcfiltFLAG = true;
                     if snr > 100
                         filt_ub = 250;
                         filt_lb = 100;
-                        filt_minsz = 2;
+                        filt_minsz = 3;
                         filt_maxsz = 5;
                     elseif snr > 75
                         filt_ub = 100;
@@ -1288,7 +1466,7 @@ TruePeaks = Peaks3;
                         filt_maxsz = 10;
                     end
                 end
-                if ~exist('filtsz', 'var')
+                if calcfiltFLAG
                     filtsz = round(((filt_ub - snr)/(filt_ub - filt_lb))*(filt_maxsz - filt_minsz) + filt_minsz);
                 end
 
@@ -1296,7 +1474,7 @@ TruePeaks = Peaks3;
                 if filtsz > filtsz_old, filtsz = filtsz_old; end
         
                 % Zero pad spectra (to account for effect of filter on sides)
-                pval = length(spec0)/2;
+                pval = round(length(spec0)/2);
                 spec_pad = padarray(spec0.', pval).';
         
                 % Extract padded fids
